@@ -1,0 +1,67 @@
+#!/bin/bash
+if [[ "$EUID" -ne 0 ]]
+then
+	echo "Sorry, you need to run this as root"
+	exit
+fi
+
+# This script is meant to be run in the destination server
+
+## Get our common functions
+## IMPORTANT NOTE: This script should be in the same folder as the 9999-common-functions.sh file when being run.
+if [[ ! -f 9999-common-functions.sh ]]
+then
+	echo "The file 9999-common-functions.sh is missing"
+	exit 1
+fi
+source 9999-common-functions.sh
+
+if [[ "$interactive" != "no" ]]
+then
+	clear
+	echo "This script will set up synchronization of the entire WordPress setup from a
+	origin server to this destination server which will act as a hot standby"
+	echo
+	echo "This script is designed to run in the DESTINATION server.
+	Before continuing, make sure that you did already run 71-origin.sh in
+	the origin server."
+	echo
+	read -p "Press enter to start the destination setup for this server"
+fi
+
+if [[ -z $origin_ip ]]
+then
+	echo
+	echo "Please, specify the ORIGIN server IP address"
+	read -p "Origin server IP: " origin_ip
+fi
+
+# if SSH key is not available, do not continue
+if ! wget -qO- $origin_ip/51796720716872671235391607993835.pub | grep "ssh-rsa" &>/dev/null
+then
+	echo "SSH key not available in the origin server!"
+	echo
+	echo "Please, run 01-origin.sh in the origin server and try again."
+	exit
+fi
+
+################# 
+#set up ssh key
+#################
+mkdir -p ~/.ssh
+# force a new line in the authorized keys file - workaround for some cloud providers leaving weird line endings in the file.
+printf "\n" >> ~/.ssh/authorized_keys 
+# now put our keys in there
+wget -qO- $origin_ip/51796720716872671235391607993835.pub | grep "ssh-rsa" >> ~/.ssh/authorized_keys
+# and change the permissions so it can be read by the login process
+chmod go-w ~
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+
+# pointer needed for the wp-sync script
+echo "### do not edit from here ###" >> /etc/ssh/sshd_config
+
+echo "
+Setup has been completed!
+$origin_ip will now sync to this server and you will be able to
+migrate from $origin_ip to this server just by switching the DNS records."

@@ -1,0 +1,342 @@
+#!/bin/bash
+if [[ "$EUID" -ne 0 ]]; then
+	echo "Sorry, you need to run this as root"
+	exit
+fi
+
+## Get our common functions
+if [[ ! -f 9999-common-functions.sh ]]
+then
+	echo "The file 9999-common-functions.sh is missing"
+	exit 1
+fi
+source 9999-common-functions.sh
+
+# for options where changes are applied to the filesystem
+select_domain () {
+while [[ -z $domain ]]; do
+    clear
+    echo "Please, select which site you want to work with"
+    gf_select_domain
+    domain=$(ls /var/www | grep -v html | sed -n "$site_number"p)
+done
+}
+
+
+# for options where changes are applied to the NGINX configuration
+select_domain_mu () {
+while [[ -z $domain ]]; do
+    echo
+    echo "Please, select which site you want to work with"
+    echo
+    gf_select_domain_nginx_ols
+done
+}
+
+
+while [[ -z $action ]]; do
+    echo "What do you want to do?"
+    echo "   1) Add a a new user to a site"
+	echo "   2) Delete a user from a site"
+	echo "   3) Delete all users with a role"
+	echo "   4) Change email address for user"
+	echo "   5) Change all credentials - email and password"
+	echo "   6) Update a site option"
+	echo "   7) Update wp-config.php option for a site"
+    echo "   8) Get secure passwordless login link for a site (Any admin user)"
+    echo "   9) Get secure passwordless login link for a site"
+    echo
+    read -p "Action: " action
+    until [[ -z "$action" || "$action" =~ ^[1-9]$ ]]; do
+    	echo "$action: invalid selection."
+    	read -p "Action: " action
+    done
+done
+
+
+
+if [[ $action == "wp_site_add_user" || $action == "1" ]]; then
+
+    select_domain
+
+    # @TODO: Replace this with gf_get_domain_user_name
+    user_name=$(echo $domain | cut -c1-32)
+
+    if [[ -z $wps_user ]]; then
+        echo
+        echo "Specify a user name for the new WordPress user
+Example: james"
+        read -p "Admin user name: " wps_user
+    fi
+
+    if [[ -z $wps_password ]]; then
+        echo
+        echo "Specify a password for the new WordPress user"
+        read -p "Admin user password: " wps_password
+    fi
+
+    if [[ -z $wps_email ]]; then
+        echo
+        echo "Specify an email address for the new WordPress user
+Example: admin@example.com"
+        read -p "Email address: " wps_email
+    fi
+	
+    if [[ -z $wps_role ]]; then
+        echo
+        echo "Specify Role"
+        read -p "Role: " wps_role
+    fi	
+
+    cd /var/www/$domain/html/
+    su - $user_name -c "wp --skip-plugins user create $wps_user $wps_email --role=$wps_role --user_pass=$wps_password"
+
+    echo
+    echo "Added user $wps_user to domain $domain with role $wps_role"
+    exit
+fi
+
+if [[ $action == "wp_site_delete_user" || $action == "2" ]]; then
+
+    select_domain
+
+    # @TODO: Replace this with gf_get_domain_user_name
+    user_name=$(echo $domain | cut -c1-32)
+
+    if [[ -z $wps_user ]]; then
+        echo
+        echo "Which user would you like to delete? You can specify an email address or a user id or a user name"
+        read -p "User id, email or username: " wps_user
+    fi
+	
+    if [[ -z $wps_reassign_posts ]]; then
+        echo
+        echo "Which user id should we reassign any existing content to?"
+        read -p "User id for existing content: " wps_reassign_posts
+    fi	
+
+    cd /var/www/$domain/html/
+	su - $user_name -c "wp --skip-plugins --network --yes user delete $wps_user --reassign=$wps_reassign_posts"
+    su - $user_name -c "wp --skip-plugins --yes user delete $wps_user --reassign=$wps_reassign_posts"
+
+    echo
+    echo "Deleted user from domain $domain"
+    exit
+fi
+
+if [[ $action == "wp_site_delete_users_with_role" || $action == "3" ]]; then
+####: This doesn't work because getting the list of users with roles fails...
+    select_domain
+
+    # @TODO: Replace this with gf_get_domain_user_name
+    user_name=$(echo $domain | cut -c1-32)
+
+    if [[ -z $wps_role ]]; then
+        echo
+        echo "Which user roles would you like to delete?  All users with this role will be deleted!"
+        read -p "Role: " wps_role
+    fi
+	
+    if [[ -z $wps_reassign_posts ]]; then
+        echo
+        echo "Which user id should we reassign any existing content to?"
+        read -p "User id for existing content: " wps_reassign_posts
+    fi	
+
+    cd /var/www/$domain/html/
+	su - $user_name -c "wp --skip-plugins --network --yes user delete $(wp user list --role=$wps_role --field=ID) --reassign=$wps_reassign_posts"
+    su - $user_name -c "wp --skip-plugins --yes user delete $(wp user list --role=$wps_role --field=ID) --reassign=$wps_reassign_posts"
+
+    echo
+    echo "Deleted users with role $wps_role from domain $domain"
+    exit
+fi
+
+if [[ $action == "wp_site_change_user_email" || $action == "4" ]]; then
+
+    select_domain
+
+    # @TODO: Replace this with gf_get_domain_user_name
+    user_name=$(echo $domain | cut -c1-32)
+
+    if [[ -z $wps_user ]]; then
+        echo
+        echo "Which user would you like to work with? You can specify an email address or a user id or a user name"
+        read -p "User id, email or username: " wps_user
+    fi
+
+    if [[ -z $wps_email ]]; then
+        echo
+        echo "Specify a new email address for the WordPress user
+Example: admin@example.com"
+        read -p "Email address: " wps_email
+    fi
+	
+    cd /var/www/$domain/html/
+    su - $user_name -c "wp --skip-plugins user update $wps_user --user_email=$wps_email"
+
+    echo
+    echo "Updated user email address for user $wps_user on $domain"
+    exit
+fi
+
+if [[ $action == "wp_site_change_credentials" || $action == "5" ]]; then
+
+    select_domain
+
+    # @TODO: Replace this with gf_get_domain_user_name
+    user_name=$(echo $domain | cut -c1-32)
+
+    if [[ -z $wps_user ]]; then
+        echo
+        echo "Which user would you like to work with? You can specify an email address or a user id or a user name"
+        read -p "User id, email or username: " wps_user
+    fi
+	
+    if [[ -z $wps_new_email ]]; then
+        echo
+        echo "Specify a new email address for the WordPress user
+Example: admin@example.com"
+        read -p "Email address: " wps_new_email
+    fi
+	
+    if [[ -z $wps_new_password ]]; then
+        echo
+        echo "Specify a new password for the WordPress user"
+        read -p "New user password: " wps_new_password
+    fi		
+	
+    cd /var/www/$domain/html/
+    su - $user_name -c "wp --skip-plugins user update $wps_user --user_email=$wps_new_email --user_pass=$wps_new_password"
+
+    echo
+    echo "Updated credentials for user $wps_user on $domain"
+    exit
+fi
+
+if [[ $action == "wp_site_update_option" || $action == "6" ]]; then
+
+    select_domain
+
+    # @TODO: Replace this with gf_get_domain_user_name
+    user_name=$(echo $domain | cut -c1-32)
+
+    if [[ -z $wps_option ]]; then
+        echo
+        echo "Which option would you like to update?"
+        read -p "WP Option: " wps_option
+    fi
+	
+    if [[ -z $wps_new_option_value ]]; then
+        echo
+        echo "What is the new option value?"
+        read -p "New Option Value: " wps_new_option_value
+    fi	
+
+    cd /var/www/$domain/html/
+    su - $user_name -c "wp --skip-plugins option update $wps_option '$wps_new_option_value'"
+
+    echo
+    echo "Updated Option Value $wps_option in domain $domain"
+    exit
+fi
+
+if [[ $action == "wp_site_update_wpconfig_option" || $action == "7" ]]; then
+
+    select_domain
+
+    # @TODO: Replace this with gf_get_domain_user_name
+    user_name=$(echo $domain | cut -c1-32)
+
+    if [[ -z $wps_wpconfig_option ]]; then
+        echo
+        echo "Which WPCONFIG.PHP option would you like to update?"
+        read -p "WP Option: " wps_wpconfig_option
+    fi
+	
+    if [[ -z $wps_new_wpconfig_option_value ]]; then
+        echo
+        echo "What is the new configuration value?"
+        read -p "New Option Value: " wps_new_wpconfig_option_value
+    fi
+	
+    if [[ -z $wps_wpconfig_option_is_raw ]]; then
+        echo
+        echo "Is this configuration item to be added as a RAW option - 'yes' or 'no'?"
+        read -p "WP configuration item is Raw - 'yes' or 'no': " wps_wpconfig_option_is_raw
+    fi	
+
+    cd /var/www/$domain/html/
+    if [[ $wps_wpconfig_option_is_raw == "no" || $wps_wpconfig_option_is_raw == "No" || $wps_wpconfig_option_is_raw == "NO" ]]; then
+		su - $user_name -c "wp --skip-plugins config set $wps_wpconfig_option $wps_new_wpconfig_option_value"
+    fi	
+    if [[ $wps_wpconfig_option_is_raw == "yes" || $wps_wpconfig_option_is_raw == "Yes" || $wps_wpconfig_option_is_raw == "YES" ]]; then
+		su - $user_name -c "wp --skip-plugins config set $wps_wpconfig_option $wps_new_wpconfig_option_value --raw"
+    fi
+    
+
+    echo
+    echo "Updated WPConfig Option Value $wps_wpconfig_option in domain $domain"
+    exit
+fi
+
+if [[ $action == "wp_site_get_passwordless_link" || $action == "8" ]]; then
+
+    # Get domain to work with.
+    select_domain
+
+    # Get the domain user name - output will be held in $g_domain_user_name
+    gf_get_domain_user_name $domain
+    user_name=$g_domain_user_name
+
+    # Install wp-cli package that will support this.
+    su - $user_name -c "wp package install aaemnnosttv/wp-cli-login-command"
+
+    # Install supporting plugin to the site.
+    su - $user_name -c "wp login install --activate --yes"
+
+    # Get list of users into variable.
+    adminusers=$(su - $user_name -c "wp user list --role=administrator --field=ID --no-color --format=csv")
+
+    # Get the first user in the list.
+    # @see: https://stackoverflow.com/questions/43167317/how-to-get-the-first-element-of-a-string-split-with-space
+    admin_user=(${adminusers[@]})
+
+    # Get passwordless link
+    link=$(su - $user_name -c "wp login create $admin_user --url-only --expires=180")
+
+    echo
+    echo $link
+    exit
+fi
+
+if [[ $action == "wp_site_get_passwordless_link_selected_user" || $action == "9" ]]; then
+
+    # Get domain to work with.
+    select_domain
+
+    # Get user name, id or email address.
+	while [[ -z $login_user ]]
+	do
+		echo
+		echo "Enter the user to login as - can be user id, user name or email address"
+		read -p "Login as: " login_user
+	done    
+
+    # Get the domain user name - output will be held in $g_domain_user_name
+    gf_get_domain_user_name $domain
+    user_name=$g_domain_user_name
+
+    # Install wp-cli package that will support this.
+    su - $user_name -c "wp package install aaemnnosttv/wp-cli-login-command"
+
+    # Install supporting plugin to the site.
+    su - $user_name -c "wp login install --activate --yes"
+
+    # Get passwordless link
+    link=$(su - $user_name -c "wp login create $login_user --url-only --expires=180")
+
+    echo
+    echo $link
+    exit
+fi

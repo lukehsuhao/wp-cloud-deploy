@@ -1,0 +1,841 @@
+#!/bin/bash
+if [[ "$EUID" -ne 0 ]]
+then
+	echo "Sorry, you need to run this as root"
+	exit
+fi
+
+## Get our common functions
+if [[ ! -f 9999-common-functions.sh ]]
+then
+	echo "The file 9999-common-functions.sh is missing"
+	exit 1
+fi
+source 9999-common-functions.sh
+
+###################################################################
+#### Add ols Netdata vhost conf
+###################################################################
+function add_ols_goaccess_conf() {
+	local olsdomain
+	olsdomain=$1
+
+	mkdir -p $VHDIR/goaccess
+	mkdir -p /var/www/$olsdomain/html/.well-known/acme-challenge
+	touch $VHDIR/goaccess/htpasswd
+	touch $VHDIR/goaccess/htgroup
+
+	cat > ${VHDIR}/goaccess/$g_vhost_conf <<- EOF
+	docRoot                   /var/www/$olsdomain/html
+
+	extprocessor goaccesshttp {
+	type                    proxy
+	address                 127.0.0.1:7890
+	note                    Goaccess
+	maxConns                1000
+	initTimeout             5
+	retryTimeout            0
+	respBuffer              0
+	}
+
+	realm Default {
+	  note                    Default password protected realm
+
+	  userDB  {
+	    location              \$SERVER_ROOT/conf/vhosts/goaccess/htpasswd
+	  }
+
+	  groupDB  {
+	    location              \$SERVER_ROOT/conf/vhosts/goaccess/htgroup
+	  }
+	}
+
+	context /.well-known/ {
+	  allowBrowse             1
+
+	  rewrite  {
+
+	  }
+	  addDefaultCharset       off
+
+	  phpIniOverride  {
+
+	  }
+	}
+
+	context /ws/ {
+	type                    proxy
+	handler                 goaccesshttp
+	addDefaultCharset       off
+	}
+
+	context / {
+          allowBrowse             1
+          note                    Default Context Headers
+          extraHeaders            <<<END_extraHeaders
+          END_extraHeaders
+        }
+
+
+	rewrite  {
+	  enable                  1
+	  autoLoadHtaccess        1
+	  rules                   <<<END_rules
+	RewriteRule "(^|/)\.(?!well-known\/)" - [F]
+	rewriteFile /var/www/${olsdomain}/html/.htaccess
+	END_rules
+	}
+
+	### Insert context configs below this line
+
+	vhssl  {
+	  keyFile                 /usr/local/lsws/conf/example.key
+	  certFile                /usr/local/lsws/conf/example.crt
+	  certChain               1
+	  sslProtocol             24
+	  ciphers                 EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH:ECDHE-RSA-AES128-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA128:DHE-RSA-AES128-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES128-GCM-SHA128:ECDHE-RSA-AES128-SHA384:ECDHE-RSA-AES128-SHA128:ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES128-SHA:DHE-RSA-AES128-SHA128:DHE-RSA-AES128-SHA128:DHE-RSA-AES128-SHA:DHE-RSA-AES128-SHA:ECDHE-RSA-DES-CBC3-SHA:EDH-RSA-DES-CBC3-SHA:AES128-GCM-SHA384:AES128-GCM-SHA128:AES128-SHA128:AES128-SHA128:AES128-SHA:AES128-SHA:DES-CBC3-SHA:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!MD5:!PSK:!RC4
+	  enableECDHE             1
+	  renegProtection         1
+	  sslSessionCache         1
+	  enableSpdy              15
+	  enableQuic              1
+	  enableStapling          1
+	  ocspRespMaxAge          86400
+	}
+	EOF
+	chown -R lsadm:lsadm ${VHDIR}/*
+	gf_add_domain_ols_httpd_conf "${olsdomain}" "goaccess"
+}
+
+OLS_PASS_PROTECT_ROOT='### Enabling Password Protection config start
+context / {
+allowBrowse             1
+note             Password Protect document root for domain
+realm                   Default
+accessControl  {
+allow                 *
+}
+rewrite  {
+}
+addDefaultCharset       off
+phpIniOverride  {
+}
+}
+### Enabling Password Protection config end'
+
+preprocessed_VAR=$(printf '%s\n' "$OLS_PASS_PROTECT_ROOT" | sed 's/\\/&&/g;s/^[[:blank:]]/\\&/;s/$/\\/')
+
+while [[ -z $action ]]; do
+	echo
+	echo "What do you want to do?"
+	echo
+	echo "   1) Install Goaccess"
+	echo "   2) Remove Goaccess"
+	echo "   3) Disable Goaccess"
+	echo "   4) Enable Goaccess"
+	echo "   5) Update Goaccess"
+	echo "   6) Enable Https"
+	echo "   7) Disable Https"
+	echo "   8) Add Authentication Basic http/https"
+	echo "   9) Remove Basic Authentication"
+	echo "   10) Change Authentication Credentials"
+	echo "   11) Whitelist Ips"
+	echo "   12) Remove Whitelist Ips"
+	echo "   13) Remove All Whitelist Ips"
+	echo "   14) Restart Daemon Service"
+	read -p "Action: " action
+	until [[ -z "$action" || "$action" =~ ^[1-9]|2[0-9]$ ]]; do
+		echo "$action: invalid selection."
+		read -p "Action: " action
+	done
+done
+
+###################################### Goaccess Install Function ##########
+function goaccess_install
+{
+	if hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is already installed!"
+		exit
+	fi
+
+	if [[ -z $domain ]]
+	then
+		clear
+		echo "Which domain name do you want for Goaccess?
+		Specify just the domain name without www or http://
+		Example: goaccess.mydomain.com"
+		read -p "Domain: " domain
+	fi
+
+	if [[ -z $user ]]
+	then
+		echo
+		echo "Specify a user name to protect access to Goaccess
+		Example: admin"
+		read -p "User name: " user
+	fi
+
+	if [[ -z $pass ]]
+	then
+		echo
+		echo "Specify a password"
+		read -p "Password: " pass
+	fi
+
+	if [ "$g_webserver_type" = "nginx" ] 
+	then
+		echo "[Unit]
+Description=GoAccess real-time web log analysis
+After=network.target
+
+[Service]
+Type=simple
+
+ExecStart=/usr/bin/goaccess -f /var/log/nginx/access.log --log-format=COMBINED    --real-time-html --ws-url=wss://$domain/ws    -o /var/www/$domain/html/index.html --port=7890   --config-file=/etc/goaccess/goaccess.conf    --origin=https://$domain
+
+ExecStop=/bin/kill -9 ${MAINPID}
+WorkingDirectory=/tmp
+[Install]
+WantedBy=multi-user.target" > /etc/systemd/system/goaccess.service
+
+		echo "server {
+			listen 80;
+			listen [::]:80;
+			server_name $domain www.$domain;
+	
+			auth_basic_user_file /etc/nginx/htpasswd/$domain;
+			auth_basic \"Protected\";
+
+			root /var/www/$domain/html;
+
+			location / {
+				try_files $uri/index.html =404;
+			}
+
+			location /ws {
+				proxy_http_version 1.1;
+				proxy_set_header Upgrade \$http_upgrade;
+				proxy_set_header Connection \"Upgrade\";
+				proxy_buffering off;
+				proxy_read_timeout 7d;
+				proxy_pass http://127.0.0.1:7890;
+			}
+			include /etc/nginx/goaccess-ips.conf;
+		}" > /etc/nginx/sites-enabled/goaccess.conf
+
+		echo "allow all;" > /etc/nginx/goaccess-ips.conf
+		# create authentication file
+		mkdir -p /etc/nginx/htpasswd /var/www/$domain/html
+		htpasswd -b -c /etc/nginx/htpasswd/$domain $user $pass
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		echo "[Unit]
+Description=GoAccess real-time web log analysis
+After=network.target
+
+[Service]
+Type=simple
+
+ExecStart=/usr/bin/goaccess -f /usr/local/lsws/logs/access.log --log-format=COMBINED    --real-time-html --ws-url=wss://$domain/ws    -o /var/www/$domain/html/index.html --port=7890   --config-file=/etc/goaccess/goaccess.conf    --origin=https://$domain
+
+ExecStop=/bin/kill -9 ${MAINPID}
+WorkingDirectory=/tmp
+[Install]
+WantedBy=multi-user.target" > /etc/systemd/system/goaccess.service
+
+		add_ols_goaccess_conf "$domain"
+		htpasswd -b -c ${VHDIR}/goaccess/htpasswd $user $pass
+		sed -i -e "/### Insert context configs below this line/a\\
+                        ${preprocessed_VAR%?}"  ${VHDIR}/goaccess/$g_vhost_conf
+		chown -R lsadm:lsadm ${VHDIR}/goaccess/
+	elif [ "$g_webserver_type" = "ols-enterprise" ]; then
+		echo 'Not implemented for ols-enterprise'
+	fi
+
+	echo "installing Goaccess on server........."
+	rm /etc/apt/sources.list.d/goaccess.list > /dev/null 2>&1  #remove the goaccess sources file if it already exists
+	echo "deb http://deb.goaccess.io/ $(lsb_release -cs) main" | sudo tee -a /etc/apt/sources.list.d/goaccess.list > /dev/null 2>&1
+	wget -O - https://deb.goaccess.io/gnugpg.key | sudo apt-key --keyring /etc/apt/trusted.gpg.d/goaccess.gpg add - > /dev/null 2>&1
+	apt-get install gnupg2 -y > /dev/null 2>&1
+	apt-get update > /dev/null 2>&1
+	apt-get install goaccess -y > /dev/null 2>&1
+	
+	systemctl daemon-reload
+	systemctl restart goaccess
+	systemctl enable goaccess
+	gf_restart_webserver
+	echo "Goaccess has been installed,Can access from http://$domain/"
+}
+
+###################################### Goaccess Remove Function ##########
+function goaccess_remove
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+	goaccess_ssl_disable
+	if [ "$g_webserver_type" = "nginx" ]
+	then
+		domain=`grep -m 1 server_name /etc/nginx/sites-enabled/goaccess.conf |awk '{print $2}'`
+		rm -f /etc/nginx/sites-enabled/goaccess.conf > /dev/null 2>&1
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		domain=$(grep -m 1 docRoot /usr/local/lsws/conf/vhosts/goaccess/vhconf.conf |awk '{print $2}'|grep -E -o "\b[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b")
+		gf_remove_ols_site "$domain" "goaccess"
+	elif [ "$g_webserver_type" = "ols-enterprise" ]
+	then
+		echo 'Not implemented for ols-enterprise'
+	fi
+
+	apt-get remove goaccess -y  > /dev/null 2>&1
+	if [ $? -ne 0 ]
+	then
+		echo "Failed to uninstall. Please check to see if the apt-get command is locked by another service"
+		exit
+	fi
+	
+	# Before attempting to remove the site from the www folder, make sure we have a value in the $domain var.
+	# This prevents us from accidentally deleting the entire www folder in the delete statement below.
+	if [[ -z $domain ]]
+	then
+		echo "Unable to fully remove goaccess because the value of the domain variable is blank."
+		rm -f /etc/systemd/system/goaccess.service > /dev/null 2>&1
+		gf_restart_webserver
+		exit
+	fi
+	
+	rm -f /etc/systemd/system/goaccess.service > /dev/null 2>&1
+	rm -rf /var/www/$domain > /dev/null 2>&1
+	gf_restart_webserver
+	echo 
+	echo "goaccess has been removed"
+}
+
+###################################### Goaccess Disable Function ##########
+function goaccess_disable
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+	systemctl stop goaccess
+	
+	if [ "$g_webserver_type" = "nginx" ]
+	then
+		domain=`grep -m 1 server_name /etc/nginx/sites-enabled/goaccess.conf |awk '{print $2}'`
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		domain=$(grep -m 1 docRoot /usr/local/lsws/conf/vhosts/goaccess/vhconf.conf |awk '{print $2}'|grep -E -o "\b[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b")
+	elif [ "$g_webserver_type" = "ols-enterprise" ]
+	then
+		echo 'Not implemented for ols-enterprise'
+	fi
+
+	rm -rf /var/www/$domain/html/index.html > /dev/null
+	echo "Goaccess has been disabled"
+}
+
+###################################### Goaccess Enable Function ##########
+function goaccess_enable
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+	systemctl start goaccess
+	echo "goaccess has been enabled"
+}
+
+###################################### Goaccess Update Function ##########
+function goaccess_update
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+	apt-get install goaccess -y > /dev/null
+	echo "Goaccess is on latest Version now"
+}
+
+###################################### Goaccess Enable SSL  Function ##########
+function goaccess_ssl_enable
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+
+	if [[ -z $email ]]
+	then
+		echo
+		echo "Specify an email for administrative notifications about your certificate"
+		read -p "Email address: " email
+	fi
+	if [ "$g_webserver_type" = "nginx" ]
+	then
+		if grep -qs "listen 443" /etc/nginx/sites-enabled/goaccess.conf;
+		then
+			echo "SSL Already Enabled";
+		else
+			domain=`grep -m 1 server_name /etc/nginx/sites-enabled/goaccess.conf |awk '{print $2}'`
+			certbot --non-interactive --reinstall --expand --nginx --agree-tos -m $email --allow-subset-of-names --redirect -d $domain -d www.$domain
+
+			if ! grep -qs "listen 443" /etc/nginx/sites-enabled/goaccess.conf
+			then
+				echo
+				echo "SSL could not be enabled for $domain"
+				exit
+			fi	
+		fi
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		domain=$(grep -m 1 docRoot /usr/local/lsws/conf/vhosts/goaccess/vhconf.conf |awk '{print $2}'|grep -E -o "\b[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b")
+		# Setup OLS Folders.
+		DOCHM="/var/www/${domain}/html"
+		mkdir -p ${DOCHM}/.well-known/acme-challenge
+
+		# Enable SSL.
+		certbot certonly --non-interactive --reinstall --agree-tos --agree-tos -m $email --webroot -w ${DOCHM} -d $domain
+
+		if [[ -e /etc/letsencrypt/live/$domain/fullchain.pem ]]; then
+			sed -i "s|/usr/local/lsws/conf/example.key|/etc/letsencrypt/live/$domain/privkey.pem|g" ${VHDIR}/goaccess/$g_vhost_conf > /dev/null 2>&1
+			sed -i "s|/usr/local/lsws/conf/example.crt|/etc/letsencrypt/live/$domain/fullchain.pem|g" ${VHDIR}/goaccess/$g_vhost_conf > /dev/null 2>&1
+			# insert redirect to https inside the rewrite under wellknown rule just under <<<END_rules
+			# RewriteCond %{SERVER_PORT} ^80$ # Enable HTTPS
+			# RewriteRule .* https://%{SERVER_NAME}%{REQUEST_URI} [R=301,L] # Enable HTTPS
+			sed -i "${VHDIR}/goaccess/$g_vhost_conf" -re "/<<<END_rules/a RewriteCond %{SERVER_PORT} ^80$ # Enable HTTPS\nRewriteRule .* https:\/\/%{SERVER_NAME}%{REQUEST_URI} [R=301,L] # Enable HTTPS"
+		fi
+	elif [ "$g_webserver_type" = "ols-enterprise" ]
+	then
+		echo 'Not implemented for ols-enterprise'
+	fi
+	gf_restart_webserver
+	echo "SSL has been enabled for $domain"
+}
+
+###################################### Goaccess Disable SSL  Function ##########
+function goaccess_ssl_disable
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+
+	if [ "$g_webserver_type" = "nginx" ]
+	then
+		if grep -qs "managed by Certbot" /etc/nginx/sites-enabled/goaccess.conf;
+		then
+			domain=`grep -m 1 server_name /etc/nginx/sites-enabled/goaccess.conf |awk '{print $2}'`
+			certbot delete --cert-name $domain --noninteractive
+			if grep -qs "managed by Certbot" /etc/nginx/sites-enabled/goaccess.conf; then
+				sed -i -n '/if ($host/q;p' /etc/nginx/sites-enabled/goaccess.conf
+				sed -i '$ d' /etc/nginx/sites-enabled/goaccess.conf
+				sed -i '/server {/a listen 80;\nlisten [::]:80;' /etc/nginx/sites-enabled/goaccess.conf
+				sed -i '/managed by Certbot/d' /etc/nginx/sites-enabled/goaccess.conf
+			fi
+			systemctl restart nginx
+			echo "SSL has been disabled for goaccess";
+		else
+			echo "SSL Not enabled for goaccess";
+		fi
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		domain=$(grep -m 1 docRoot /usr/local/lsws/conf/vhosts/goaccess/vhconf.conf |awk '{print $2}'|grep -E -o "\b[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b")
+
+		# Lets find and delete the two lines with '# Enable HTTPS'
+		# RewriteCond %{SERVER_PORT} ^80$ # Enable HTTPS
+		# RewriteRule .* https://%{SERVER_NAME}%{REQUEST_URI} [R=301,L] # Enable HTTPS
+		sed -i "${VHDIR}/goaccess/$g_vhost_conf" -re '/# Enable HTTPS/d'
+		gf_disable_certbot_ols_site "$domain"
+	elif [ "$g_webserver_type" = "ols-enterprise" ]
+	then
+		echo 'Not implemented for ols-enterprise'
+	fi
+}
+
+###################################### Goaccess Add Basic Auth##########
+function goaccess_auth_add
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+
+	if [ "$g_webserver_type" = "nginx" ]
+	then
+		grep -w auth /etc/nginx/sites-enabled/goaccess.conf
+		if [ $? -eq 0 ]
+		then
+			echo "Basic Auth already enabled"
+		else
+			sed -i 's/#auth/auth/g' /etc/nginx/sites-enabled/goaccess.conf
+			systemctl restart nginx > /dev/null
+			echo "Basic auth has been enabled"
+		fi
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		grep -wq '### Enabling Password Protection config' ${VHDIR}/goaccess/$g_vhost_conf
+		if [ $? -eq 0 ]
+		then
+			echo "Basic Auth already enable"
+		else
+			sed -i -e "/### Insert context configs below this line/a\\
+			${preprocessed_VAR%?}"  ${VHDIR}/goaccess/$g_vhost_conf
+			systemctl restart lsws > /dev/null
+		fi
+	elif [ "$g_webserver_type" = "ols-enterprise" ]
+	then
+		echo 'Not implemented for ols-enterprise'
+	fi
+}
+
+###################################### Goaccess Remove Basic Auth##########
+function goaccess_auth_remove
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+
+	if [ "$g_webserver_type" = "nginx" ]
+	then
+		grep -w '#auth' /etc/nginx/sites-enabled/goaccess.conf
+		if [ $? -eq 0 ]
+		then
+			echo "Basic Auth already disabled"
+		else
+			sed -i 's/auth/#auth/g' /etc/nginx/sites-enabled/goaccess.conf
+			systemctl restart nginx > /dev/null
+			echo "Basic Auth has been disabled"
+		fi
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		grep -wq '### Enabling Password Protection config' ${VHDIR}/goaccess/$g_vhost_conf
+		if [ $? -eq 1 ]
+		then
+			echo "Basic Auth already disabled"
+		else
+			# Remove block from vhost config
+			sed -i -re '/### Enabling Password Protection config start/{:a;N;/### Enabling Password Protection config end/!ba};/note             Password Protect document root for domain/d' ${VHDIR}/goaccess/$g_vhost_conf
+			chown -R lsadm:lsadm ${VHDIR}/goaccess/
+			systemctl restart lsws > /dev/null
+		fi
+	elif [ "$g_webserver_type" = "ols-enterprise" ]
+	then
+		echo 'Not implemented for ols-enterprise'
+	fi
+}
+
+###################################### Goaccess Change Basic Auth##########
+function goaccess_auth_change
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+
+	if [[ -z $user ]]
+	then
+		echo
+		echo "Specify a user name to protect access to Goaccess"
+		read -p "User name: " user
+	fi
+
+	if [[ -z $pass ]]
+	then
+		echo
+		echo "Specify a password"
+		read -p "Password: " pass
+	fi
+
+	if [ "$g_webserver_type" = "nginx" ]
+	then
+		domain=`grep -m 1 server_name /etc/nginx/sites-enabled/goaccess.conf |awk '{print $2}'`
+		rm -f /etc/nginx/htpasswd/$domain > /dev/null
+		htpasswd -b -c /etc/nginx/htpasswd/$domain $user $pass
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		rm -f ${VHDIR}/goaccess/htpasswd > /dev/null
+		htpasswd -b -c ${VHDIR}/goaccess/htpasswd $user $pass
+		chown -R lsadm:lsadm ${VHDIR}/goaccess/
+	elif [ "$g_webserver_type" = "ols-enterprise" ] ; then
+		echo 'Not implemented for ols-enterprise'
+	fi
+	gf_restart_webserver	
+	echo "Auth has been updated"
+}
+
+###################################### Goaccess Whitelist Ip##########
+function goaccess_whitelist
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+
+	if [ "$g_webserver_type" = "nginx" ]
+	then
+		whitelisted=`grep allow /etc/nginx/goaccess-ips.conf |awk '{print $2}'|tr '\n' ' '`
+		if [[ -z $whiteip ]]
+		then
+			echo
+			read -p "Enter Whitelist IP to access Goaccess Report[$whitelisted]  :" whiteip
+		fi
+		for ip in $(echo $whiteip | sed "s/,/ /g")
+		do
+			grep deny /etc/nginx/goaccess-ips.conf > /dev/null
+			if [ $? -eq 0 ]
+			then
+				grep -w $ip /etc/nginx/goaccess-ips.conf > /dev/null
+				if [ $? -ne 0 ]
+				then
+					sed -i "/deny all;/ i allow $ip;" /etc/nginx/goaccess-ips.conf
+				fi
+			else
+				sed -i "s/allow all;/allow $ip;\ndeny all;/g" /etc/nginx/goaccess-ips.conf
+			fi
+			nginx -t > /dev/null 2>&1
+			if [ $? -ne 0 ]
+			then
+				sed -i "/allow $ip;/d" /etc/nginx/goaccess-ips.conf
+				echo "$ip is not valid"
+			else
+				echo "$ip whitelisted"
+			fi
+		done
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		domain=$(grep -m 1 docRoot /usr/local/lsws/conf/vhosts/goaccess/vhconf.conf |awk '{print $2}'|grep -E -o "\b[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b")
+		whitelisted=`grep REMOTE_ADDR /var/www/$domain/html/.htaccess|cut -d'^' -f2|tr '\n' ' '`
+		if [[ -z $whiteip ]]
+		then
+			echo
+			read -p "Enter Whitelist IP to access Goaccess Report[$whitelisted]  :" whiteip
+		fi
+		for ip in $(echo $whiteip | sed "s/,/ /g")
+		do
+			grep -q REMOTE_ADDR /var/www/$domain/html/.htaccess > /dev/null 2>&1
+			if [ $? -eq 0 ]
+			then
+				grep -wq $ip /var/www/$domain/html/.htaccess > /dev/null 2>&1
+				if [ $? -ne 0 ]
+				then
+					sed -i "1 i\RewriteCond %{REMOTE_ADDR} !^$ip" /var/www/$domain/html/.htaccess
+				fi
+			else
+				echo "RewriteCond %{REMOTE_ADDR} !^$ip
+RewriteRule ^/.*$ - [F,L]" > /var/www/$domain/html/.htaccess
+			fi
+		done
+	elif [ "$g_webserver_type" = "ols-enterprise" ] ; then
+		echo 'Not implemented for ols-enterprise'
+	fi
+	gf_restart_webserver	
+}
+
+###################################### Goaccess Blacklist Ip##########
+function goaccess_whitelist_remove
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+
+	if [ "$g_webserver_type" = "nginx" ]
+	then
+		whitelisted=`grep allow /etc/nginx/goaccess-ips.conf |awk '{print $2}'|tr '\n' ' '`
+		if [[ -z $blackip ]]
+		then
+			echo
+			read -p "Enter IP to remove from Goaccess Whitelist[$whitelisted]  :" blackip
+		fi
+		for ip in $(echo $blackip | sed "s/,/ /g")
+		do
+			grep "allow $ip" /etc/nginx/goaccess-ips.conf > /dev/null
+			if [ $? -eq 0 ]
+			then
+				sed -i "/allow $ip;/d" /etc/nginx/goaccess-ips.conf
+				echo "$ip removed from whitelist";
+			else
+				echo "$ip is not whitelisted";
+			fi
+		done
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		domain=$(grep -m 1 docRoot /usr/local/lsws/conf/vhosts/goaccess/vhconf.conf |awk '{print $2}'|grep -E -o "\b[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b")
+		whitelisted=`grep REMOTE_ADDR /var/www/$domain/html/.htaccess|cut -d'^' -f2|tr '\n' ' '`
+		if [[ -z $blackip ]]
+		then
+			echo
+			read -p "Enter IP to remove from Goaccess Whitelist[$whitelisted]  :" blackip
+		fi
+		for ip in $(echo $blackip | sed "s/,/ /g")
+		do
+			grep -wq $ip /var/www/$domain/html/.htaccess > /dev/null 2>&1
+			if [ $? -eq 0 ]
+			then
+				sed -i "/RewriteCond %{REMOTE_ADDR} !^$ip/d" /var/www/$domain/html/.htaccess
+				echo "$ip removed from whitelist";
+			else
+				echo "$ip is not whitelisted";
+			fi
+		done
+		grep -q REMOTE_ADDR /var/www/$domain/html/.htaccess
+		if [ $? -ne 0 ]
+		then
+			rm -f /var/www/$domain/html/.htaccess
+		fi
+	elif [ "$g_webserver_type" = "ols-enterprise" ] ; then
+		echo 'Not implemented for ols-enterprise'
+	fi
+	gf_restart_webserver	
+}
+
+###################################### Goaccess Remove All Whitelisted Ips##########
+function goaccess_whitelist_removeall
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+
+	if [ "$g_webserver_type" = "nginx" ]
+	then
+		echo "deny all;" > /etc/nginx/goaccess-ips.conf
+	elif [ "$g_webserver_type" = "ols" ]
+	then
+		domain=$(grep -m 1 docRoot /usr/local/lsws/conf/vhosts/goaccess/vhconf.conf |awk '{print $2}'|grep -E -o "\b[A-Za-z0-9.-]+\.[A-Za-z]{2,6}\b")
+		rm -f /var/www/$domain/html/.htaccess
+	elif [ "$g_webserver_type" = "ols-enterprise" ] ; then
+		echo 'Not implemented for ols-enterprise'
+	fi
+	gf_restart_webserver	
+	echo "All whiteslited ips has been removed";
+}
+
+###################################### Goaccess Restart Daemon Function ##########
+function goaccess_restart
+{
+	if ! hash goaccess 2>/dev/null
+	then
+		echo
+		echo "goaccess is Not installed yet!"
+		exit
+	fi
+	systemctl stop goaccess
+	systemctl start goaccess
+	echo "goaccess daemon has been restarted"
+}
+
+########################################################################################################3
+########################################################################################################3
+############## Install Goaccess 
+if [[ $action == "goaccess_install" || $action == "1" ]]
+then
+	goaccess_install
+fi
+
+############ Uninstall Goaccess
+if [[ $action == "goaccess_remove" || $action == "2" ]]
+then
+	goaccess_remove
+fi
+
+####### Disable Goaccess Service
+if [[ $action == "goaccess_disable" || $action == "3" ]]
+then
+	goaccess_disable
+fi
+
+####### Enable Goaccess Service
+if [[ $action == "goaccess_enable" || $action == "4" ]]
+then
+	goaccess_enable
+fi
+
+##############  Update Goaccess
+if [[ $action == "goaccess_update" || $action == "5" ]]
+then
+	goaccess_update
+fi
+
+############## Enable SSL
+if [[ $action == "goaccess_ssl_enable" || $action == "6" ]]
+then
+	goaccess_ssl_enable
+fi
+
+############## Update services/protocol
+if [[ $action == "goaccess_ssl_disable" || $action == "7" ]]
+then
+	goaccess_ssl_disable
+fi
+
+########## Add Basic Authentication
+if [[ $action == "goaccess_auth_add" || $action == "8" ]]
+then
+	goaccess_auth_add
+fi
+
+########## Remove Basic Authentication
+if [[ $action == "goaccess_auth_remove" || $action == "9" ]]
+then
+	goaccess_auth_remove
+fi
+
+########## Modify Basic Auth password
+if [[ $action == "goaccess_auth_change" || $action == "10" ]]
+then
+	goaccess_auth_change
+fi
+
+####### WhiteList Ip
+if [[ $action == "goaccess_whitelist" || $action == "11" ]]
+then
+	goaccess_whitelist
+fi
+
+####### BlackList Ip
+if [[ $action == "goaccess_whitelist_remove" || $action == "12" ]]
+then
+	goaccess_whitelist_remove
+fi
+
+####### Remove all Whitelisted Ip
+if [[ $action == "goaccess_whitelist_removeall" || $action == "13" ]]
+then
+	goaccess_whitelist_removeall
+fi
+
+####### Restart Daemon
+if [[ $action == "goaccess_restart" || $action == "14" ]]
+then
+	goaccess_restart
+fi
